@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Solana Tracker</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0d12'/><text y='24' x='4' font-size='22' fill='%2314f195'>&#9670;</text></svg>">
+<style>
+  :root {
+    --bg: #0a0d12; --surface: #0f1318; --border: #1d2330; --border2: #2a3142;
+    --text: #e8ecf1; --muted: #7a8899; --green: #14f195; --red: #f4545c;
+    --amber: #f5a623; --purple: #9945ff;
+    --mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: var(--mono); margin: 0; padding: 24px; }
+  .hub-link { display: inline-block; color: var(--muted); font-size: 12px; text-decoration: none; margin-bottom: 6px; }
+  .hub-link:hover { color: var(--green); }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+  .title { font-size: 20px; font-weight: 600; }
+  .subtitle { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  input { font-family: var(--mono); background: var(--surface); border: 1px solid var(--border2); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; width: 280px; }
+  .btn { font-family: var(--mono); font-size: 13px; font-weight: 500; padding: 8px 18px; border-radius: 8px; border: 1px solid var(--purple); color: var(--bg); background: var(--purple); cursor: pointer; }
+  .portfolio-bar { display: flex; gap: 40px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; }
+  .portfolio-stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .portfolio-stat-value { font-size: 22px; font-weight: 600; }
+  .portfolio-stat-value.accent { color: var(--purple); }
+  .portfolio-stat-value.warn { color: var(--amber); }
+  .position-card { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--green); border-radius: 12px; padding: 20px 24px; margin-bottom: 16px; }
+  .position-card.out-range { border-left-color: var(--amber); }
+  .pos-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+  .pos-title { font-size: 16px; font-weight: 600; }
+  .pos-title .fee-tag { font-size: 11px; color: var(--muted); background: var(--border); padding: 2px 8px; border-radius: 4px; margin-left: 8px; }
+  .pos-title .chain-tag { font-size: 10px; color: var(--purple); background: rgba(153,69,255,0.12); padding: 2px 8px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .range-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .range-badge.in { background: rgba(20,241,149,0.12); color: var(--green); }
+  .range-badge.out { background: rgba(245,166,35,0.12); color: var(--amber); }
+  .pos-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; }
+  .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .stat-value { font-size: 15px; font-weight: 500; }
+  .stat-value.dim { color: var(--muted); font-size: 12px; }
+  .fees-row { background: rgba(122,136,153,0.08); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-top: 16px; font-size: 12px; color: var(--muted); }
+  .empty-state { color: var(--muted); padding: 40px; text-align: center; }
+  .error-banner { background: rgba(244,84,92,0.08); border: 1px solid rgba(244,84,92,0.25); border-radius: 8px; padding: 12px 16px; font-size: 12px; color: var(--red); margin-bottom: 20px; display: none; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <a href="https://v4.lptracker.info" class="hub-link">← Hub</a>
+      <div class="title">◈ Solana Tracker</div>
+      <div class="subtitle">Orca Whirlpool positions · Solana — fees not yet available, value/range only</div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <input id="wallet-input" placeholder="Wallet address...">
+      <button class="btn" onclick="loadPositions(true)">Load</button>
+    </div>
+  </div>
+
+  <div class="error-banner" id="error-banner"></div>
+  <div id="portfolio"></div>
+  <div id="positions"></div>
+
+<script>
+function fmtUsd(n) {
+  if (n === null || n === undefined) return '—';
+  return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtNum(n, decimals) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function fmtPct(n, decimals) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toFixed(decimals) + '%';
+}
+function feeTierLabel(feeTierRaw) {
+  return (feeTierRaw / 10000).toFixed(2) + '%';
+}
+
+function renderPortfolio(portfolio) {
+  const el = document.getElementById('portfolio');
+  if (!portfolio || portfolio.position_count === 0) {
+    el.innerHTML = `<div class="empty-state">No open Orca Whirlpool positions found for this wallet.</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="portfolio-bar">
+      <div><div class="portfolio-stat-label">Total Value</div><div class="portfolio-stat-value accent">${fmtUsd(portfolio.total_value_usd)}</div></div>
+      <div><div class="portfolio-stat-label">Positions</div><div class="portfolio-stat-value">${portfolio.position_count}</div></div>
+      <div><div class="portfolio-stat-label">Out of Range</div><div class="portfolio-stat-value ${portfolio.out_of_range_count > 0 ? 'warn' : ''}">${portfolio.out_of_range_count} / ${portfolio.position_count}</div></div>
+    </div>
+  `;
+}
+
+function renderPositions(positions) {
+  const el = document.getElementById('positions');
+  if (!positions || positions.length === 0) { el.innerHTML = ''; return; }
+
+  el.innerHTML = positions.map(p => {
+    const sym0 = p.token0.symbol, sym1 = p.token1.symbol;
+    const rangeClass = p.in_range ? '' : 'out-range';
+    const badgeClass = p.in_range ? 'in' : 'out';
+    const badgeText = p.in_range ? 'In Range' : 'Out of Range';
+    const usdValue = fmtUsd(p.position_value_usd);
+    const rangeWidthPct = ((p.price_upper - p.price_lower) / p.current_price * 100);
+
+    return `
+      <div class="position-card ${rangeClass}">
+        <div class="pos-header">
+          <div class="pos-title">${sym0} / ${sym1}<span class="fee-tag">${feeTierLabel(p.fee_tier)}</span><span class="chain-tag">Solana</span></div>
+          <span class="range-badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="pos-grid">
+          <div>
+            <div class="stat-label">Current Holdings</div>
+            <div class="stat-value">${fmtNum(p.amount0, 6)} ${sym0} + ${fmtNum(p.amount1, 6)} ${sym1}</div>
+            <div class="stat-value" style="margin-top:2px;">${usdValue}</div>
+          </div>
+          <div>
+            <div class="stat-label">Price Range</div>
+            <div class="stat-value">${fmtNum(p.price_lower, 4)} – ${fmtNum(p.price_upper, 4)}</div>
+            <div class="stat-value dim" style="margin-top:2px;">Width ${fmtPct(rangeWidthPct, 1)}</div>
+          </div>
+          <div>
+            <div class="stat-label">Current Price</div>
+            <div class="stat-value">${fmtNum(p.current_price, 4)}</div>
+          </div>
+        </div>
+        <div class="fees-row">Uncollected fees: not yet available (known gap — see project README)</div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadPositions(bust) {
+  const walletInput = document.getElementById('wallet-input').value.trim();
+  const url = `/api/positions${walletInput ? '?wallet=' + encodeURIComponent(walletInput) : ''}${bust ? (walletInput ? '&' : '?') + 'bust=1' : ''}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    document.getElementById('error-banner').style.display = 'none';
+    renderPortfolio(data.portfolio);
+    renderPositions(data.positions);
+  } catch (e) {
+    const el = document.getElementById('error-banner');
+    el.textContent = 'Could not load positions: ' + e.message;
+    el.style.display = 'block';
+  }
+}
+
+loadPositions(false);
+setInterval(() => loadPositions(false), 90000);
+</script>
+</body>
+</html>
