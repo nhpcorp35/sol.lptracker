@@ -49,7 +49,7 @@
     <div>
       <a href="https://v4.lptracker.info" class="hub-link">← Hub</a>
       <div class="title">◈ Solana Tracker</div>
-      <div class="subtitle">Orca Whirlpool positions · Solana — fees not yet available, value/range only</div>
+      <div class="subtitle">Orca Whirlpool positions · Solana</div>
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
       <input id="wallet-input" placeholder="Wallet address...">
@@ -131,7 +131,9 @@ function renderPositions(positions) {
             <div class="stat-value">${p.estimated_apr_pct === null || p.estimated_apr_pct === undefined ? '—' : fmtPct(p.estimated_apr_pct, 1)}</div>
           </div>
         </div>
-        <div class="fees-row">Uncollected fees: not yet available (known gap — see project README)</div>
+        <div class="fees-row">${p.fees_available
+          ? `Uncollected fees: ${fmtNum(p.uncollected_fees0, 6)} ${sym0} + ${fmtNum(p.uncollected_fees1, 6)} ${sym1}${p.uncollected_fees_usd !== null && p.uncollected_fees_usd !== undefined ? ' (' + fmtUsd(p.uncollected_fees_usd) + ')' : ''}`
+          : 'Uncollected fees: unavailable for this position'}</div>
       </div>
     `;
   }).join('');

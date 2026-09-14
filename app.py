@@ -93,6 +93,11 @@ def enrich_with_usd(positions: list) -> list:
         if price0 is not None and price1 is not None:
             position_value_usd = p["amount0"] * price0 + p["amount1"] * price1
         p["position_value_usd"] = position_value_usd
+
+        fees_usd = None
+        if p.get("fees_available") and price0 is not None and price1 is not None:
+            fees_usd = p["uncollected_fees0"] * price0 + p["uncollected_fees1"] * price1
+        p["uncollected_fees_usd"] = fees_usd
     return positions
 
 

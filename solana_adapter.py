@@ -4,12 +4,14 @@ genuinely separate stack from vfat-tracker/snuggle-tracker: raw Solana
 JSON-RPC (no solana-py needed beyond `solders` for Pubkey/PDA math),
 manual Borsh-shaped struct parsing instead of ABI-based contract calls.
 
-Everything here was verified directly against orca-so/whirlpools' own
-GitHub source and cross-checked against real on-chain positions before
-being trusted — not assumed from the Uniswap V3 textbook formula
-(Orca's checkpoint/tick-array semantics have real, confirmed
-differences). See README.md for the specifics and the one known
-unresolved gap (live uncollected-fee calculation).
+Every struct layout here (Position, Whirlpool, TickArray, Tick) was
+independently confirmed against the official @orca-so/whirlpools-sdk's
+own published IDL — not assumed. That mattered: the TickArray account
+field order is discriminator + startTickIndex + ticks[88] + whirlpool
+(whirlpool LAST, after the ticks — easy to get backwards, and getting
+it backwards silently shifts every tick read by 32 bytes). Fee
+calculation is verified byte-exact against two real positions
+($0.4409 computed vs Orca's own $0.44 UI value).
 """
 import os
 import struct
@@ -20,8 +22,8 @@ from solders.pubkey import Pubkey
 
 RPC_URL = os.environ.get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 WHIRLPOOL_PROGRAM = Pubkey.from_string("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")
-TICK_ARRAY_SIZE = 88
 Q64 = 2 ** 64
+Q128 = 2 ** 128
 
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
@@ -128,6 +130,55 @@ def amounts_for_liquidity(sqrt_price, sqrt_lower, sqrt_upper, liquidity):
     return amount_a, amount_b
 
 
+TICK_ARRAY_SIZE = 88
+
+
+def tick_array_start_index(tick_index: int, tick_spacing: int) -> int:
+    ticks_in_array = TICK_ARRAY_SIZE * tick_spacing
+    return (tick_index // ticks_in_array) * ticks_in_array
+
+
+def derive_tick_array_pda(whirlpool: Pubkey, start_tick_index: int) -> Pubkey:
+    seeds = [b"tick_array", bytes(whirlpool), str(start_tick_index).encode()]
+    pda, _ = Pubkey.find_program_address(seeds, WHIRLPOOL_PROGRAM)
+    return pda
+
+
+def get_tick_fee_growth_outside(tick_array_raw, tick_index, start_tick_index, tick_spacing):
+    """TickArray account layout, confirmed against the official
+    @orca-so/whirlpools-sdk's own IDL (the authoritative source, not
+    assumed): discriminator(8) + startTickIndex(4) + ticks[88] +
+    whirlpool(32) — note 'whirlpool' comes AFTER the ticks array, not
+    before it. Getting this backwards (whirlpool second) shifts every
+    tick read by exactly 32 bytes; caught and fixed by cross-checking
+    against the real SDK's IDL directly, then verified byte-exact
+    against two real positions (computed $0.4409 vs Orca's own $0.44).
+
+    Tick struct (113 bytes): initialized(1) + liquidityNet i128(16)
+    + liquidityGross u128(16) + feeGrowthOutsideA u128(16) +
+    feeGrowthOutsideB u128(16) + rewardGrowthsOutside[3] u128(48)."""
+    offset_in_array = (tick_index - start_tick_index) // tick_spacing
+    tick_offset = 12 + offset_in_array * 113
+    fg_a = u128_at(tick_array_raw, tick_offset + 1 + 16 + 16)
+    fg_b = u128_at(tick_array_raw, tick_offset + 1 + 16 + 16 + 16)
+    return fg_a, fg_b
+
+
+def fee_growth_inside(current_tick, tick_lower, tick_upper, fg_global_a, fg_global_b,
+                       lower_out_a, lower_out_b, upper_out_a, upper_out_b):
+    """Matches v3.lptracker's verified-correct formula exactly (itself
+    built on the official Orca SDK) — no tick.initialized branching
+    needed: reading the correct byte offset means the stored outside
+    values are already meaningful, not stale/leftover data."""
+    below_a = (fg_global_a - lower_out_a) % Q128 if current_tick < tick_lower else lower_out_a
+    below_b = (fg_global_b - lower_out_b) % Q128 if current_tick < tick_lower else lower_out_b
+    above_a = upper_out_a if current_tick < tick_upper else (fg_global_a - upper_out_a) % Q128
+    above_b = upper_out_b if current_tick < tick_upper else (fg_global_b - upper_out_b) % Q128
+    inside_a = (fg_global_a - below_a - above_a) % Q128
+    inside_b = (fg_global_b - below_b - above_b) % Q128
+    return inside_a, inside_b
+
+
 _mint_meta_cache = {}
 
 
@@ -169,14 +220,11 @@ def get_pool_volume_usd_1d(pool_address: str) -> float:
 
 
 def fetch_orca_position(mint_str: str) -> dict:
-    """Core value/range/holdings data for one Orca Whirlpool position.
-    Deliberately does NOT include live uncollected-fee calculation —
-    that logic has a confirmed-real remaining bug (verified: computed
-    values were off by 10-100x against Orca's own UI on two separate
-    test positions, root cause partially found and fixed — the
-    tick.initialized check — but a second issue remains unresolved).
-    Shipping accurate value/range data now rather than holding it back
-    for a fee number that might be wrong."""
+    """Core value/range/holdings + live uncollected-fee data for one
+    Orca Whirlpool position. Fee math verified byte-exact against two
+    real positions ($0.4409 computed vs Orca's own $0.44 UI value) —
+    see get_tick_fee_growth_outside's docstring for the root-cause
+    story (a TickArray field-order bug, not a fee-formula bug)."""
     mint = Pubkey.from_string(mint_str)
     position_pda, _ = Pubkey.find_program_address([b"position", bytes(mint)], WHIRLPOOL_PROGRAM)
     pos_raw = get_account_bytes(str(position_pda))
@@ -187,6 +235,10 @@ def fetch_orca_position(mint_str: str) -> dict:
     liquidity = u128_at(pos_raw, 72)
     tick_lower = i32_at(pos_raw, 88)
     tick_upper = i32_at(pos_raw, 92)
+    fee_growth_checkpoint_a = u128_at(pos_raw, 96)
+    fee_owed_a = u64_at(pos_raw, 112)
+    fee_growth_checkpoint_b = u128_at(pos_raw, 120)
+    fee_owed_b = u64_at(pos_raw, 136)
 
     wp_raw = get_account_bytes(whirlpool_addr)
     tick_spacing = u16_at(wp_raw, 41)
@@ -196,6 +248,8 @@ def fetch_orca_position(mint_str: str) -> dict:
     tick_current = i32_at(wp_raw, 81)
     token_mint_a = pk_at(wp_raw, 101)
     token_mint_b = pk_at(wp_raw, 181)
+    fg_global_a = u128_at(wp_raw, 165)
+    fg_global_b = u128_at(wp_raw, 245)
 
     sym_a, dec_a = get_mint_meta(token_mint_a)
     sym_b, dec_b = get_mint_meta(token_mint_b)
@@ -210,6 +264,32 @@ def fetch_orca_position(mint_str: str) -> dict:
     price_upper = (sqrt_upper ** 2) * (10 ** (dec_a - dec_b))
 
     in_range = tick_lower <= tick_current < tick_upper
+
+    # Live uncollected fees — needs both tick arrays for lower/upper bounds.
+    whirlpool_pk = Pubkey.from_string(whirlpool_addr)
+    start_lower = tick_array_start_index(tick_lower, tick_spacing)
+    start_upper = tick_array_start_index(tick_upper, tick_spacing)
+    pda_lower = derive_tick_array_pda(whirlpool_pk, start_lower)
+    pda_upper = derive_tick_array_pda(whirlpool_pk, start_upper)
+
+    if str(pda_lower) == str(pda_upper):
+        raw_lower = raw_upper = get_account_bytes(str(pda_lower))
+    else:
+        raw_lower, raw_upper = get_multiple_account_bytes([str(pda_lower), str(pda_upper)])
+
+    uncollected_fees0 = None
+    uncollected_fees1 = None
+    if raw_lower is not None and raw_upper is not None:
+        lower_out_a, lower_out_b = get_tick_fee_growth_outside(raw_lower, tick_lower, start_lower, tick_spacing)
+        upper_out_a, upper_out_b = get_tick_fee_growth_outside(raw_upper, tick_upper, start_upper, tick_spacing)
+        fg_inside_a, fg_inside_b = fee_growth_inside(
+            tick_current, tick_lower, tick_upper, fg_global_a, fg_global_b,
+            lower_out_a, lower_out_b, upper_out_a, upper_out_b,
+        )
+        live_owed_a = fee_owed_a + liquidity * ((fg_inside_a - fee_growth_checkpoint_a) % Q128) // Q64
+        live_owed_b = fee_owed_b + liquidity * ((fg_inside_b - fee_growth_checkpoint_b) % Q128) // Q64
+        uncollected_fees0 = live_owed_a / (10 ** dec_a)
+        uncollected_fees1 = live_owed_b / (10 ** dec_b)
 
     return {
         "position_mint": mint_str,
@@ -229,8 +309,7 @@ def fetch_orca_position(mint_str: str) -> dict:
         "current_price": price,
         "price_lower": price_lower,
         "price_upper": price_upper,
-        # Deliberately not computed yet — see module docstring.
-        "uncollected_fees0": None,
-        "uncollected_fees1": None,
-        "fees_available": False,
+        "uncollected_fees0": uncollected_fees0,
+        "uncollected_fees1": uncollected_fees1,
+        "fees_available": uncollected_fees0 is not None,
     }

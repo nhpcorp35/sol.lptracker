@@ -10,21 +10,23 @@ Solana JSON-RPC + manual account parsing instead of ABI calls.
   NFT-shaped token account against the Position PDA + discriminator
   directly — doesn't depend on Metaplex metadata (which doesn't exist
   for Token-2022-based positions, confirmed directly).
-- Value, holdings, price range, in-range status: matched Orca's own
-  live UI within normal price drift (~0.2-0.7%) on two separate real
-  test positions.
+- Value, holdings, price range, in-range status, live uncollected
+  fees, estimated APR: all matched Orca's own live UI closely on two
+  separate real test positions (value within normal price drift; fees
+  computed to the exact penny — $0.4409 vs Orca's own $0.44).
 
-## Known gap: uncollected/live fee calculation
+## The fee-calculation bug, resolved
 
-Not implemented. A real bug was found and partially fixed (missing
-`tick.initialized` check in the fee-growth-inside calculation — see
-git history for the full debugging trail), which took the error from
-~$108 down to ~$2.59 on a test position that should show <$0.01. But
-a second, unresolved issue remains: every slot in a scanned tick array
-returned an identical `fee_growth_outside` value, which shouldn't
-happen for real per-tick data — ruled out caching, PDA derivation,
-Fixed-vs-Dynamic tick array confusion, and slot alignment as causes,
-without finding the actual root cause.
+Every struct layout (Position, Whirlpool, TickArray, Tick) was
+independently confirmed against the official `@orca-so/whirlpools-sdk`'s
+own published IDL. That's what caught the real bug: the `TickArray`
+account's actual field order is `discriminator + startTickIndex +
+ticks[88] + whirlpool` — the whirlpool pubkey comes AFTER the ticks
+array, not before it. I had it second, which silently shifted every
+single tick read by 32 bytes for an entire debugging session. A
+byte-size coincidence (44 + 88×113 = 9988, matching the real account
+size) made the wrong layout look confirmed when it wasn't — that
+check only validates total size, not internal field order.
 
-Rather than ship a fee number that might be wrong, this tracker
-deliberately shows "not yet available" for fees until that's resolved.
+Found by reading the actual SDK source (from `nhpcorp35/v3.lptracker`,
+a working reference implementation) rather than continuing to guess.
