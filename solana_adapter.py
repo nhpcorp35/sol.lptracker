@@ -153,6 +153,21 @@ def get_mint_meta(mint_address: str):
     return meta
 
 
+def get_pool_volume_usd_1d(pool_address: str) -> float:
+    """Most recent day's trading volume for a pool, via GeckoTerminal's
+    OHLCV endpoint (Solana network — same casing rules apply: Solana
+    pool addresses are case-sensitive base58, never lowercase them)."""
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool_address}/ohlcv/day?limit=1"
+    resp = requests.get(url, timeout=8)
+    resp.raise_for_status()
+    data = resp.json()
+    ohlcv_list = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+    if not ohlcv_list:
+        return None
+    # [timestamp, open, high, low, close, volume] — most recent first
+    return float(ohlcv_list[0][5])
+
+
 def fetch_orca_position(mint_str: str) -> dict:
     """Core value/range/holdings data for one Orca Whirlpool position.
     Deliberately does NOT include live uncollected-fee calculation —
@@ -176,6 +191,7 @@ def fetch_orca_position(mint_str: str) -> dict:
     wp_raw = get_account_bytes(whirlpool_addr)
     tick_spacing = u16_at(wp_raw, 41)
     fee_rate = u16_at(wp_raw, 45)
+    pool_liquidity = u128_at(wp_raw, 49)
     sqrt_price_raw = u128_at(wp_raw, 65)
     tick_current = i32_at(wp_raw, 81)
     token_mint_a = pk_at(wp_raw, 101)
@@ -207,6 +223,7 @@ def fetch_orca_position(mint_str: str) -> dict:
         "current_tick": tick_current,
         "in_range": in_range,
         "liquidity": liquidity,
+        "pool_liquidity": pool_liquidity,
         "amount0": amt_a_raw / (10 ** dec_a),
         "amount1": amt_b_raw / (10 ** dec_b),
         "current_price": price,
