@@ -126,6 +126,10 @@ function renderPositions(positions) {
             <div class="stat-label">Current Price</div>
             <div class="stat-value">${fmtNum(p.current_price, 4)}</div>
           </div>
+          <div>
+            <div class="stat-label">Est. APR (pool activity)</div>
+            <div class="stat-value">${p.estimated_apr_pct === null || p.estimated_apr_pct === undefined ? '—' : fmtPct(p.estimated_apr_pct, 1)}</div>
+          </div>
         </div>
         <div class="fees-row">Uncollected fees: not yet available (known gap — see project README)</div>
       </div>

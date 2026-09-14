@@ -123,6 +123,41 @@ def fetch_all_positions(wallet: str):
     return positions
 
 
+def attach_estimated_apr(positions: list) -> list:
+    """Instant APR estimate from current pool activity — same approach
+    as vfat-tracker tonight: most recent day's volume × fee rate × your
+    share of the pool's active liquidity. Doesn't need history/baseline
+    tracking, unlike a true 'since deposited' APR."""
+    volume_cache = {}
+    for p in positions:
+        if not p["in_range"]:
+            p["estimated_apr_pct"] = 0.0
+            continue
+        if not p.get("pool_liquidity") or not p.get("position_value_usd"):
+            p["estimated_apr_pct"] = None
+            continue
+
+        pool_addr = p["whirlpool_address"]
+        if pool_addr not in volume_cache:
+            try:
+                volume_cache[pool_addr] = sa.get_pool_volume_usd_1d(pool_addr)
+            except Exception as e:
+                app.logger.warning("Pool volume fetch failed for estimated APR (%s): %s", pool_addr, e)
+                volume_cache[pool_addr] = None
+
+        daily_volume_usd = volume_cache[pool_addr]
+        if daily_volume_usd is None:
+            p["estimated_apr_pct"] = None
+            continue
+
+        fee_fraction = p["fee_tier"] / 1_000_000
+        daily_pool_fees_usd = daily_volume_usd * fee_fraction
+        share = p["liquidity"] / p["pool_liquidity"]
+        your_daily_fees_usd = daily_pool_fees_usd * share
+        p["estimated_apr_pct"] = (your_daily_fees_usd / p["position_value_usd"]) * 365 * 100
+    return positions
+
+
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
@@ -143,6 +178,7 @@ def api_positions():
     try:
         positions = fetch_all_positions(wallet)
         positions = enrich_with_usd(positions)
+        positions = attach_estimated_apr(positions)
     except Exception as e:
         app.logger.error("Position fetch failed for %s: %s", wallet, e)
         stale = _stale_cache.get(cache_key)
