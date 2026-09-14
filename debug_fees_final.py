@@ -21,7 +21,7 @@ def derive_tick_array_pda(whirlpool, start_tick_index):
 
 def get_tick(raw, tick_index, start_tick_index, tick_spacing):
     offset_in_array = (tick_index - start_tick_index) // tick_spacing
-    off = 44 + offset_in_array * 113
+    off = 12 + offset_in_array * 113
     initialized = raw[off] != 0
     fg_a = sa.u128_at(raw, off + 1 + 16 + 16)
     fg_b = sa.u128_at(raw, off + 1 + 16 + 16 + 16)
