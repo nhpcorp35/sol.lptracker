@@ -58,16 +58,22 @@ _GECKOTERMINAL_TOKEN_PRICE_URL = "https://api.geckoterminal.com/api/v2/simple/ne
 
 
 def get_token_prices_usd(addresses: list) -> dict:
+    """Solana addresses are base58 and case-sensitive — unlike Ethereum's
+    case-insensitive hex addresses, lowercasing here corrupts them into a
+    different, nonexistent string. Confirmed directly: this exact bug
+    (copied from the EVM trackers' pattern) was why pricing silently
+    returned nothing — the raw API call works perfectly with correct
+    casing preserved throughout."""
     if not addresses:
         return {}
-    unique = sorted(set(a.lower() for a in addresses))
+    unique = sorted(set(addresses))
     url = _GECKOTERMINAL_TOKEN_PRICE_URL.format(",".join(unique))
     try:
         resp = requests.get(url, timeout=8)
         resp.raise_for_status()
         data = resp.json()
         token_prices = data.get("data", {}).get("attributes", {}).get("token_prices", {})
-        return {addr.lower(): float(price) for addr, price in token_prices.items()}
+        return {addr: float(price) for addr, price in token_prices.items()}
     except Exception as e:
         app.logger.warning("GeckoTerminal price fetch failed: %s", e)
         return {}
@@ -81,8 +87,8 @@ def enrich_with_usd(positions: list) -> list:
     prices = get_token_prices_usd(all_addresses)
 
     for p in positions:
-        price0 = prices.get(p["token0"]["address"].lower())
-        price1 = prices.get(p["token1"]["address"].lower())
+        price0 = prices.get(p["token0"]["address"])
+        price1 = prices.get(p["token1"]["address"])
         position_value_usd = None
         if price0 is not None and price1 is not None:
             position_value_usd = p["amount0"] * price0 + p["amount1"] * price1
