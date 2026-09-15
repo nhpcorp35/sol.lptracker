@@ -14,8 +14,11 @@ be wrong; fees show as "not yet available", not a guessed number.
 """
 import os
 import time
+import json
+import fcntl
 import base64
 import logging
+import threading
 
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
@@ -34,6 +37,54 @@ DEFAULT_WALLET = os.environ.get("DEFAULT_WALLET", "").strip()
 
 HISTORY_DIR = os.environ.get("HISTORY_DIR", "/data")
 os.makedirs(HISTORY_DIR, exist_ok=True)
+_history_lock = threading.Lock()
+SNAPSHOT_INTERVAL = 3600  # 1 hour
+
+
+def _read_json_locked(path: str, default):
+    try:
+        with open(path, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                return json.load(f)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def _write_json_locked(path: str, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            json.dump(data, f)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _history_file_path(name: str) -> str:
+    return os.path.join(HISTORY_DIR, f"history_{name}.json")
+
+
+def _closed_positions_file_path() -> str:
+    return os.path.join(HISTORY_DIR, "closed_positions.json")
+
+
+def _known_positions_file_path() -> str:
+    return os.path.join(HISTORY_DIR, "known_positions.json")
+
+
+def append_history_snapshot(name: str, snapshot: dict):
+    path = _history_file_path(name)
+    with _history_lock:
+        history = _read_json_locked(path, [])
+        history.append(snapshot)
+        _write_json_locked(path, history)
+
+
+def load_history(name: str) -> list:
+    return _read_json_locked(_history_file_path(name), [])
 
 
 @app.before_request
@@ -163,6 +214,133 @@ def attach_estimated_apr(positions: list) -> list:
     return positions
 
 
+def capture_snapshot():
+    """Runs hourly. Records a baseline (value + uncollected-fees, both
+    USD) for any position that doesn't have one yet — same self-healing
+    approach as vfat-tracker: never overwrites an existing baseline,
+    and resets it on a detected deposit/withdrawal (liquidity change)
+    so P&L doesn't count your own capital moves as gains or losses."""
+    if not DEFAULT_WALLET:
+        return
+    try:
+        positions = fetch_all_positions(DEFAULT_WALLET)
+        positions = enrich_with_usd(positions)
+    except Exception as e:
+        app.logger.warning("Snapshot capture failed: %s", e)
+        return
+
+    now = time.time()
+    with _history_lock:
+        known = _read_json_locked(_known_positions_file_path(), {})
+        current_keys = {p["position_mint"] for p in positions}
+        closed_now = [k for k in known if k not in current_keys]
+
+        if closed_now:
+            closed_list = _read_json_locked(_closed_positions_file_path(), [])
+            for key in closed_now:
+                last_known = known[key]
+                closed_list.append({
+                    "key": key,
+                    "pool": last_known.get("pool"),
+                    "closed_at": now,
+                    "last_value_usd": last_known.get("last_value_usd"),
+                })
+                _append_closed_marker(key, now)
+            _write_json_locked(_closed_positions_file_path(), closed_list)
+
+        for p in positions:
+            key = p["position_mint"]
+            prior = known.get(key, {})
+            baseline_value_usd = prior.get("baseline_value_usd")
+            baseline_fees_usd = prior.get("baseline_fees_usd")
+            baseline_ts = prior.get("baseline_ts")
+
+            prior_liquidity = prior.get("last_liquidity")
+            liquidity_changed = prior_liquidity is not None and p["liquidity"] != prior_liquidity
+
+            if (baseline_value_usd is None or liquidity_changed) and p["position_value_usd"] is not None:
+                baseline_value_usd = p["position_value_usd"]
+                baseline_fees_usd = p["uncollected_fees_usd"] or 0.0
+                baseline_ts = now
+            known[key] = {
+                "pool": f"{p['token0']['symbol']}/{p['token1']['symbol']}",
+                "whirlpool_address": p["whirlpool_address"],
+                "last_liquidity": p["liquidity"],
+                "baseline_value_usd": baseline_value_usd,
+                "baseline_fees_usd": baseline_fees_usd,
+                "baseline_ts": baseline_ts,
+                "last_value_usd": p["position_value_usd"],
+                "last_seen": now,
+            }
+        _write_json_locked(_known_positions_file_path(), known)
+
+    portfolio = compute_portfolio_summary(positions)
+    append_history_snapshot("portfolio", {
+        "ts": now,
+        "total_value_usd": portfolio["total_value_usd"],
+        "position_count": portfolio["position_count"],
+        "out_of_range_count": portfolio["out_of_range_count"],
+    })
+
+    for p in positions:
+        append_history_snapshot(f"pos_{p['position_mint']}", {
+            "ts": now,
+            "value_usd": p["position_value_usd"],
+            "fees_usd": p["uncollected_fees_usd"],
+            "in_range": p["in_range"],
+        })
+
+
+def _append_closed_marker(key: str, ts: float):
+    path = _history_file_path(f"pos_{key}")
+    history = _read_json_locked(path, [])
+    history.append({"ts": ts, "key": key, "closed": True})
+    _write_json_locked(path, history)
+
+
+def _snapshot_loop():
+    while True:
+        try:
+            capture_snapshot()
+        except Exception as e:
+            app.logger.error("Snapshot loop error: %s", e)
+        time.sleep(SNAPSHOT_INTERVAL)
+
+
+def attach_pnl_and_apr(positions: list) -> list:
+    """Same approach as vfat-tracker: P&L and APR are 'since we started
+    tracking,' not true lifetime figures (no cumulative-fee counter
+    exists on-chain for a raw position). Read-only — the background
+    snapshot loop is the sole writer of known_positions.json."""
+    known = _read_json_locked(_known_positions_file_path(), {})
+    now = time.time()
+    for p in positions:
+        entry = known.get(p["position_mint"])
+        baseline_value = entry.get("baseline_value_usd") if entry else None
+        baseline_fees = entry.get("baseline_fees_usd") if entry else None
+        baseline_ts = entry.get("baseline_ts") if entry else None
+
+        pnl_usd = pnl_pct = apr_pct = None
+        if baseline_value is not None and baseline_value > 0 and p["position_value_usd"] is not None:
+            pnl_usd = p["position_value_usd"] - baseline_value
+            pnl_pct = pnl_usd / baseline_value * 100.0
+
+        if not p["in_range"]:
+            apr_pct = 0.0
+        elif (baseline_fees is not None and baseline_ts is not None
+                and p["uncollected_fees_usd"] is not None and p["position_value_usd"]):
+            days_tracked = (now - baseline_ts) / 86400.0
+            fees_earned = max(0.0, p["uncollected_fees_usd"] - baseline_fees)
+            if days_tracked > 0.5 and p["position_value_usd"] > 0:
+                apr_pct = fees_earned / p["position_value_usd"] * (365.0 / days_tracked) * 100.0
+
+        p["baseline_value_usd"] = baseline_value
+        p["pnl_usd"] = pnl_usd
+        p["pnl_pct"] = pnl_pct
+        p["apr_pct"] = apr_pct
+    return positions
+
+
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
@@ -184,6 +362,7 @@ def api_positions():
         positions = fetch_all_positions(wallet)
         positions = enrich_with_usd(positions)
         positions = attach_estimated_apr(positions)
+        positions = attach_pnl_and_apr(positions)
     except Exception as e:
         app.logger.error("Position fetch failed for %s: %s", wallet, e)
         stale = _stale_cache.get(cache_key)
@@ -205,6 +384,79 @@ def api_positions():
 @app.route("/api/health")
 def health():
     return jsonify({"ok": True})
+
+
+_RANGE_TO_SECONDS = {"7d": 7 * 86400, "30d": 30 * 86400, "90d": 90 * 86400, "all": None}
+_VOLUME_RANGE_DAYS = {"7d": 7, "30d": 30, "60d": 60, "90d": 90, "180d": 180}
+_POOL_VOLUME_CACHE = {}
+_POOL_VOLUME_CACHE_TTL = 1800
+
+
+def get_pool_volume_usd(pool_address: str, days: int) -> list:
+    cache_key = f"{pool_address}:{days}"
+    cached = _POOL_VOLUME_CACHE.get(cache_key)
+    if cached and time.time() - cached["fetched_at"] < _POOL_VOLUME_CACHE_TTL:
+        return cached["candles"]
+    candles = sa.get_pool_volume_candles(pool_address, days)
+    _POOL_VOLUME_CACHE[cache_key] = {"candles": candles, "fetched_at": time.time()}
+    return candles
+
+
+@app.route("/api/history")
+def api_history():
+    range_key = request.args.get("range", "30d")
+    if range_key not in _RANGE_TO_SECONDS:
+        return jsonify({"error": "range must be one of: 7d, 30d, 90d, all"}), 400
+    history = load_history("portfolio")
+    window_seconds = _RANGE_TO_SECONDS[range_key]
+    if window_seconds is not None:
+        cutoff = time.time() - window_seconds
+        history = [s for s in history if s["ts"] >= cutoff]
+    return jsonify({"snapshots": history, "range": range_key})
+
+
+@app.route("/api/history/<mint>")
+def api_position_history(mint):
+    range_key = request.args.get("range", "30d")
+    if range_key not in _RANGE_TO_SECONDS:
+        return jsonify({"error": "range must be one of: 7d, 30d, 90d, all"}), 400
+    history = load_history(f"pos_{mint}")
+    window_seconds = _RANGE_TO_SECONDS[range_key]
+    if window_seconds is not None:
+        cutoff = time.time() - window_seconds
+        history = [s for s in history if s["ts"] >= cutoff]
+    return jsonify({"snapshots": history, "range": range_key, "mint": mint})
+
+
+@app.route("/api/closed")
+def api_closed_positions():
+    closed = _read_json_locked(_closed_positions_file_path(), [])
+    closed_sorted = sorted(closed, key=lambda c: c["closed_at"], reverse=True)
+    return jsonify({"closed": closed_sorted})
+
+
+@app.route("/api/pool-volume/<mint>")
+def api_pool_volume(mint):
+    range_key = request.args.get("range", "30d")
+    if range_key not in _VOLUME_RANGE_DAYS:
+        return jsonify({"error": "range must be one of: 7d, 30d, 60d, 90d, 180d"}), 400
+
+    known = _read_json_locked(_known_positions_file_path(), {})
+    entry = known.get(mint)
+    pool_address = entry.get("whirlpool_address") if entry else None
+    if not pool_address:
+        return jsonify({"error": "Pool address not yet known for this position — "
+                                  "check back after the next snapshot cycle."}), 404
+    try:
+        candles = get_pool_volume_usd(pool_address, _VOLUME_RANGE_DAYS[range_key])
+    except Exception as e:
+        app.logger.warning("Pool volume fetch failed for %s: %s", pool_address, e)
+        return jsonify({"error": "Volume data unavailable right now"}), 502
+    return jsonify({"candles": candles, "range": range_key, "mint": mint})
+
+
+_snapshot_thread = threading.Thread(target=_snapshot_loop, daemon=True)
+_snapshot_thread.start()
 
 
 if __name__ == "__main__":

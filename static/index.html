@@ -42,9 +42,21 @@
   .fees-row { background: rgba(122,136,153,0.08); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-top: 16px; font-size: 12px; color: var(--muted); }
   .empty-state { color: var(--muted); padding: 40px; text-align: center; }
   .error-banner { background: rgba(244,84,92,0.08); border: 1px solid rgba(244,84,92,0.25); border-radius: 8px; padding: 12px 16px; font-size: 12px; color: var(--red); margin-bottom: 20px; display: none; }
+  .pos-history-toggle { cursor: pointer; color: var(--purple); font-size: 12px; margin-top: 14px; user-select: none; }
+  .pos-history-panel { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .pos-history-subheader { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 14px 0 6px; }
+  .range-btns { display: flex; gap: 6px; margin-bottom: 8px; }
+  .range-btn { font-size: 11px; color: var(--muted); background: transparent; border: 1px solid var(--border2); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-family: var(--mono); }
+  .range-btn.active { background: var(--purple); color: #fff; border-color: var(--purple); }
+  .history-chart-wrap { position: relative; }
+  .history-empty { font-size: 12px; color: var(--muted); text-align: center; padding: 30px 0; }
+  .pnl-sub { font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+  .pnl-pos { color: var(--green); }
+  .pnl-neg { color: var(--red); }
 </style>
 </head>
 <body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
   <div class="header">
     <div>
       <a href="https://v4.lptracker.info" class="hub-link">← Hub</a>
@@ -73,6 +85,14 @@ function fmtNum(n, decimals) {
 function fmtPct(n, decimals) {
   if (n === null || n === undefined) return '—';
   return Number(n).toFixed(decimals) + '%';
+}
+function fmtPnl(usd, pct) {
+  if (usd === null || usd === undefined) return null;
+  const cls = usd >= 0 ? 'pnl-pos' : 'pnl-neg';
+  const sign = usd >= 0 ? '+' : '-';
+  const usdStr = sign + '$' + Math.abs(usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const pctStr = (pct !== null && pct !== undefined) ? ` (${sign}${Math.abs(pct).toFixed(2)}%)` : '';
+  return { cls, text: usdStr + pctStr };
 }
 function feeTierLabel(feeTierRaw) {
   return (feeTierRaw / 10000).toFixed(2) + '%';
@@ -104,6 +124,9 @@ function renderPositions(positions) {
     const badgeText = p.in_range ? 'In Range' : 'Out of Range';
     const usdValue = fmtUsd(p.position_value_usd);
     const rangeWidthPct = ((p.price_upper - p.price_lower) / p.current_price * 100);
+    const pnl = fmtPnl(p.pnl_usd, p.pnl_pct);
+    const pnlLine = pnl ? `<div class="pnl-sub ${pnl.cls}">${pnl.text}</div>` : '';
+    const posKey = p.position_mint;
 
     return `
       <div class="position-card ${rangeClass}">
@@ -116,6 +139,7 @@ function renderPositions(positions) {
             <div class="stat-label">Current Holdings</div>
             <div class="stat-value">${fmtNum(p.amount0, 6)} ${sym0} + ${fmtNum(p.amount1, 6)} ${sym1}</div>
             <div class="stat-value" style="margin-top:2px;">${usdValue}</div>
+            ${pnlLine}
           </div>
           <div>
             <div class="stat-label">Price Range</div>
@@ -130,13 +154,208 @@ function renderPositions(positions) {
             <div class="stat-label">Est. APR (pool activity)</div>
             <div class="stat-value">${p.estimated_apr_pct === null || p.estimated_apr_pct === undefined ? '—' : fmtPct(p.estimated_apr_pct, 1)}</div>
           </div>
+          <div>
+            <div class="stat-label">APR (since tracked)</div>
+            <div class="stat-value">${p.apr_pct === null || p.apr_pct === undefined ? '—' : fmtPct(p.apr_pct, 1)}</div>
+          </div>
         </div>
         <div class="fees-row">${p.fees_available
           ? `Uncollected fees: ${fmtNum(p.uncollected_fees0, 6)} ${sym0} + ${fmtNum(p.uncollected_fees1, 6)} ${sym1}${p.uncollected_fees_usd !== null && p.uncollected_fees_usd !== undefined ? ' (' + fmtUsd(p.uncollected_fees_usd) + ')' : ''}`
           : 'Uncollected fees: unavailable for this position'}</div>
+
+        <div class="pos-history-toggle" onclick="togglePositionHistory('${posKey}')">
+          <span id="pos-history-arrow-${posKey}">▸</span> Position History
+        </div>
+        <div class="pos-history-panel" id="pos-history-panel-${posKey}" style="display:none;">
+          <div class="range-btns" id="pos-history-btns-${posKey}">
+            <button class="range-btn" onclick="setPositionHistoryRange('${posKey}', '7d', this)">7D</button>
+            <button class="range-btn active" onclick="setPositionHistoryRange('${posKey}', '30d', this)">30D</button>
+            <button class="range-btn" onclick="setPositionHistoryRange('${posKey}', '90d', this)">90D</button>
+            <button class="range-btn" onclick="setPositionHistoryRange('${posKey}', 'all', this)">All</button>
+          </div>
+          <div class="history-chart-wrap" style="height:160px;"><canvas id="pos-history-chart-${posKey}"></canvas></div>
+
+          <div class="pos-history-subheader">Pool Volume (USD)</div>
+          <div class="range-btns" id="pos-volume-btns-${posKey}">
+            <button class="range-btn" onclick="setPositionVolumeRange('${posKey}', '7d', this)">7D</button>
+            <button class="range-btn active" onclick="setPositionVolumeRange('${posKey}', '30d', this)">30D</button>
+            <button class="range-btn" onclick="setPositionVolumeRange('${posKey}', '60d', this)">60D</button>
+            <button class="range-btn" onclick="setPositionVolumeRange('${posKey}', '90d', this)">90D</button>
+            <button class="range-btn" onclick="setPositionVolumeRange('${posKey}', '180d', this)">180D</button>
+          </div>
+          <div class="history-chart-wrap" style="height:120px;"><canvas id="pos-volume-chart-${posKey}"></canvas></div>
+        </div>
       </div>
     `;
   }).join('');
+}
+
+const positionPanelOpened = {};
+const positionCurrentRange = {};
+const positionVolumeCurrentRange = {};
+const positionChartInstances = {};
+const positionVolumeChartInstances = {};
+
+function togglePositionHistory(mint) {
+  const panel = document.getElementById(`pos-history-panel-${mint}`);
+  const arrow = document.getElementById(`pos-history-arrow-${mint}`);
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) { panel.style.display = 'none'; arrow.textContent = '▸'; return; }
+  panel.style.display = 'block';
+  arrow.textContent = '▾';
+  if (!positionPanelOpened[mint]) {
+    positionPanelOpened[mint] = true;
+    positionCurrentRange[mint] = '30d';
+    positionVolumeCurrentRange[mint] = '30d';
+    loadPositionHistory(mint, '30d');
+    loadPositionVolume(mint, '30d');
+  }
+}
+
+function setPositionHistoryRange(mint, range, btnEl) {
+  positionCurrentRange[mint] = range;
+  btnEl.parentElement.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  btnEl.classList.add('active');
+  loadPositionHistory(mint, range);
+}
+
+function setPositionVolumeRange(mint, range, btnEl) {
+  positionVolumeCurrentRange[mint] = range;
+  btnEl.parentElement.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  btnEl.classList.add('active');
+  loadPositionVolume(mint, range);
+}
+
+async function loadPositionHistory(mint, range) {
+  const canvas = document.getElementById(`pos-history-chart-${mint}`);
+  try {
+    const res = await fetch(`/api/history/${mint}?range=${range}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    renderPositionHistoryChart(mint, canvas, data.snapshots || []);
+  } catch (e) {
+    if (positionChartInstances[mint]) { positionChartInstances[mint].destroy(); positionChartInstances[mint] = null; }
+    canvas.style.display = 'none';
+    const wrap = canvas.parentElement;
+    let msg = wrap.querySelector('.history-empty');
+    if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty'; wrap.appendChild(msg); }
+    msg.textContent = 'History unavailable: ' + e.message;
+  }
+}
+
+function renderPositionHistoryChart(mint, canvas, snapshots) {
+  const wrap = canvas.parentElement;
+  const existingMsg = wrap.querySelector('.history-empty');
+  const withValue = snapshots.filter(s => s.value_usd !== undefined && s.value_usd !== null);
+
+  if (!withValue.length) {
+    if (positionChartInstances[mint]) { positionChartInstances[mint].destroy(); positionChartInstances[mint] = null; }
+    canvas.style.display = 'none';
+    let msg = existingMsg;
+    if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty'; wrap.appendChild(msg); }
+    msg.textContent = 'No history yet for this position in this range.';
+    return;
+  }
+  if (existingMsg) existingMsg.remove();
+  canvas.style.display = 'block';
+
+  const labels = withValue.map(s => new Date(s.ts * 1000));
+  const values = withValue.map(s => s.value_usd);
+
+  if (positionChartInstances[mint]) positionChartInstances[mint].destroy();
+  positionChartInstances[mint] = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Position Value (USD)', data: values, borderColor: '#9945ff',
+      backgroundColor: 'rgba(153,69,255,0.08)', fill: true, tension: 0.25, pointRadius: 0 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { type: 'time', time: { tooltipFormat: 'MMM d, HH:mm' }, ticks: { color: '#7a8899', font: { size: 9 } }, grid: { color: '#1d2330' } },
+        y: { ticks: { color: '#7a8899', font: { size: 9 } }, grid: { color: '#1d2330' } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+async function loadPositionVolume(mint, range) {
+  const canvas = document.getElementById(`pos-volume-chart-${mint}`);
+  if (!canvas) return;
+  try {
+    const res = await fetch(`/api/pool-volume/${mint}?range=${range}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    renderPositionVolumeChart(mint, canvas, data.candles || []);
+  } catch (e) {
+    if (positionVolumeChartInstances[mint]) { positionVolumeChartInstances[mint].destroy(); positionVolumeChartInstances[mint] = null; }
+    canvas.style.display = 'none';
+    const wrap = canvas.parentElement;
+    let msg = wrap.querySelector('.volume-empty');
+    if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty volume-empty'; wrap.appendChild(msg); }
+    msg.textContent = 'Volume unavailable: ' + e.message;
+  }
+}
+
+function renderPositionVolumeChart(mint, canvas, candles) {
+  const wrap = canvas.parentElement;
+  const existingMsg = wrap.querySelector('.volume-empty');
+  if (!candles.length) {
+    if (positionVolumeChartInstances[mint]) { positionVolumeChartInstances[mint].destroy(); positionVolumeChartInstances[mint] = null; }
+    canvas.style.display = 'none';
+    let msg = existingMsg;
+    if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty volume-empty'; wrap.appendChild(msg); }
+    msg.textContent = 'No volume data available for this pool.';
+    return;
+  }
+  if (existingMsg) existingMsg.remove();
+  canvas.style.display = 'block';
+
+  const labels = candles.map(c => new Date(c.ts * 1000));
+  const values = candles.map(c => c.volume_usd);
+
+  if (positionVolumeChartInstances[mint]) positionVolumeChartInstances[mint].destroy();
+  positionVolumeChartInstances[mint] = new Chart(canvas, {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Pool Volume (USD)', data: values, backgroundColor: 'rgba(20,241,149,0.35)', borderColor: 'rgba(20,241,149,0.6)', borderWidth: 1 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM d' }, ticks: { color: '#7a8899', font: { size: 9 } }, grid: { color: '#1d2330' } },
+        y: { ticks: { color: '#7a8899', font: { size: 9 } }, grid: { color: '#1d2330' } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function restoreOpenPositionHistories(positions) {
+  for (const p of positions) {
+    const mint = p.position_mint;
+    if (!positionPanelOpened[mint]) continue;
+    const panel = document.getElementById(`pos-history-panel-${mint}`);
+    const arrow = document.getElementById(`pos-history-arrow-${mint}`);
+    if (!panel) continue;
+    panel.style.display = 'block';
+    if (arrow) arrow.textContent = '▾';
+
+    const range = positionCurrentRange[mint] || '30d';
+    const btnsContainer = document.getElementById(`pos-history-btns-${mint}`);
+    if (btnsContainer) {
+      btnsContainer.querySelectorAll('.range-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent.trim().toLowerCase() === range.toLowerCase());
+      });
+    }
+    loadPositionHistory(mint, range);
+
+    const volRange = positionVolumeCurrentRange[mint] || '30d';
+    const volBtnsContainer = document.getElementById(`pos-volume-btns-${mint}`);
+    if (volBtnsContainer) {
+      volBtnsContainer.querySelectorAll('.range-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent.trim().toLowerCase() === volRange.toLowerCase());
+      });
+    }
+    loadPositionVolume(mint, volRange);
+  }
 }
 
 async function loadPositions(bust) {
@@ -149,6 +368,7 @@ async function loadPositions(bust) {
     document.getElementById('error-banner').style.display = 'none';
     renderPortfolio(data.portfolio);
     renderPositions(data.positions);
+    restoreOpenPositionHistories(data.positions || []);
   } catch (e) {
     const el = document.getElementById('error-banner');
     el.textContent = 'Could not load positions: ' + e.message;

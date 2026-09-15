@@ -204,19 +204,29 @@ def get_mint_meta(mint_address: str):
     return meta
 
 
-def get_pool_volume_usd_1d(pool_address: str) -> float:
-    """Most recent day's trading volume for a pool, via GeckoTerminal's
-    OHLCV endpoint (Solana network — same casing rules apply: Solana
-    pool addresses are case-sensitive base58, never lowercase them)."""
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool_address}/ohlcv/day?limit=1"
-    resp = requests.get(url, timeout=8)
+def get_pool_volume_candles(pool_address: str, days: int) -> list:
+    """Daily volume candles for a pool, most recent `days` days.
+    Returns [{"ts": ..., "volume_usd": ...}, ...] sorted oldest-first —
+    same shape as vfat-tracker's get_pool_volume_usd, for a consistent
+    frontend chart implementation across trackers."""
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool_address}/ohlcv/day"
+    resp = requests.get(url, params={"aggregate": 1, "limit": days, "currency": "usd"}, timeout=10)
     resp.raise_for_status()
     data = resp.json()
     ohlcv_list = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
-    if not ohlcv_list:
+    return sorted(
+        ({"ts": row[0], "volume_usd": row[5]} for row in ohlcv_list),
+        key=lambda c: c["ts"],
+    )
+
+
+def get_pool_volume_usd_1d(pool_address: str) -> float:
+    """Most recent day's volume only — used by the instant APR estimate,
+    which doesn't need the full candle history."""
+    candles = get_pool_volume_candles(pool_address, 1)
+    if not candles:
         return None
-    # [timestamp, open, high, low, close, volume] — most recent first
-    return float(ohlcv_list[0][5])
+    return candles[-1]["volume_usd"]
 
 
 def fetch_orca_position(mint_str: str) -> dict:
