@@ -2,13 +2,11 @@ import time
 import requests
 
 url = "https://vfat.lptracker.info/api/positions"
-print(f"Hitting {url} ...")
-start = time.time()
-try:
-    resp = requests.get(url, timeout=90)
-    elapsed = time.time() - start
-    print(f"Status: {resp.status_code}, elapsed: {elapsed:.2f}s")
-    print(f"Body (first 2000 chars): {resp.text[:2000]}")
-except Exception as e:
-    elapsed = time.time() - start
-    print(f"FAILED after {elapsed:.2f}s: {type(e).__name__}: {e}")
+print("=== Without auth ===")
+resp = requests.get(url, timeout=15)
+print(f"Status: {resp.status_code}, body: {resp.text[:200]}")
+
+print("\n=== With the known password ===")
+resp2 = requests.get(url, auth=("", "J__9EXrwEA77ScMf"), timeout=30)
+print(f"Status: {resp2.status_code}")
+print(f"Body (first 1500 chars): {resp2.text[:1500]}")
