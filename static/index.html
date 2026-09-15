@@ -234,7 +234,7 @@ async function loadPositionHistory(mint, range) {
     if (!res.ok) throw new Error(data.error || 'Request failed');
     renderPositionHistoryChart(mint, canvas, data.snapshots || []);
   } catch (e) {
-    if (positionChartInstances[mint]) { positionChartInstances[mint].destroy(); positionChartInstances[mint] = null; }
+    const c = Chart.getChart(canvas); if (c) c.destroy();
     canvas.style.display = 'none';
     const wrap = canvas.parentElement;
     let msg = wrap.querySelector('.history-empty');
@@ -249,7 +249,7 @@ function renderPositionHistoryChart(mint, canvas, snapshots) {
   const withValue = snapshots.filter(s => s.value_usd !== undefined && s.value_usd !== null);
 
   if (!withValue.length) {
-    if (positionChartInstances[mint]) { positionChartInstances[mint].destroy(); positionChartInstances[mint] = null; }
+    const c = Chart.getChart(canvas); if (c) c.destroy();
     canvas.style.display = 'none';
     let msg = existingMsg;
     if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty'; wrap.appendChild(msg); }
@@ -262,7 +262,13 @@ function renderPositionHistoryChart(mint, canvas, snapshots) {
   const labels = withValue.map(s => new Date(s.ts * 1000));
   const values = withValue.map(s => s.value_usd);
 
-  if (positionChartInstances[mint]) positionChartInstances[mint].destroy();
+  // Ask Chart.js itself what's on this canvas, rather than rely solely
+  // on our own tracking object — a fast auto-refresh (renderPositions()
+  // regenerating fresh <canvas> elements) can race an in-flight async
+  // chart load and leave positionChartInstances pointing at a stale
+  // reference. Chart.getChart() is the source of truth.
+  const existingChart = Chart.getChart(canvas);
+  if (existingChart) existingChart.destroy();
   positionChartInstances[mint] = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets: [{ label: 'Position Value (USD)', data: values, borderColor: '#9945ff',
@@ -287,7 +293,7 @@ async function loadPositionVolume(mint, range) {
     if (!res.ok) throw new Error(data.error || 'Request failed');
     renderPositionVolumeChart(mint, canvas, data.candles || []);
   } catch (e) {
-    if (positionVolumeChartInstances[mint]) { positionVolumeChartInstances[mint].destroy(); positionVolumeChartInstances[mint] = null; }
+    const cv = Chart.getChart(canvas); if (cv) cv.destroy();
     canvas.style.display = 'none';
     const wrap = canvas.parentElement;
     let msg = wrap.querySelector('.volume-empty');
@@ -300,7 +306,7 @@ function renderPositionVolumeChart(mint, canvas, candles) {
   const wrap = canvas.parentElement;
   const existingMsg = wrap.querySelector('.volume-empty');
   if (!candles.length) {
-    if (positionVolumeChartInstances[mint]) { positionVolumeChartInstances[mint].destroy(); positionVolumeChartInstances[mint] = null; }
+    const cv = Chart.getChart(canvas); if (cv) cv.destroy();
     canvas.style.display = 'none';
     let msg = existingMsg;
     if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty volume-empty'; wrap.appendChild(msg); }
@@ -313,7 +319,8 @@ function renderPositionVolumeChart(mint, canvas, candles) {
   const labels = candles.map(c => new Date(c.ts * 1000));
   const values = candles.map(c => c.volume_usd);
 
-  if (positionVolumeChartInstances[mint]) positionVolumeChartInstances[mint].destroy();
+  const existingVolumeChart = Chart.getChart(canvas);
+  if (existingVolumeChart) existingVolumeChart.destroy();
   positionVolumeChartInstances[mint] = new Chart(canvas, {
     type: 'bar',
     data: { labels, datasets: [{ label: 'Pool Volume (USD)', data: values, backgroundColor: 'rgba(20,241,149,0.35)', borderColor: 'rgba(20,241,149,0.6)', borderWidth: 1 }] },
