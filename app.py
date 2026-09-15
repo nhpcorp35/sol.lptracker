@@ -149,6 +149,20 @@ def enrich_with_usd(positions: list) -> list:
         if p.get("fees_available") and price0 is not None and price1 is not None:
             fees_usd = p["uncollected_fees0"] * price0 + p["uncollected_fees1"] * price1
         p["uncollected_fees_usd"] = fees_usd
+
+        # Range-bar support fields, same convention as vfat-tracker.
+        cp, pl, pu = p.get("current_price"), p.get("price_lower"), p.get("price_upper")
+        pct_from_lower = pct_from_upper = None
+        if cp and pl is not None and pu is not None and cp > 0:
+            pct_from_lower = (cp - pl) / cp * 100.0
+            pct_from_upper = (pu - cp) / cp * 100.0
+        p["pct_from_lower"] = pct_from_lower
+        p["pct_from_upper"] = pct_from_upper
+
+        if pl and pu and pl > 0:
+            p["range_width_pct"] = (pu - pl) / pl * 100.0
+        else:
+            p["range_width_pct"] = None
     return positions
 
 

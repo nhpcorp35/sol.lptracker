@@ -8,7 +8,7 @@
 <style>
   :root {
     --bg: #0a0d12; --surface: #0f1318; --border: #1d2330; --border2: #2a3142;
-    --text: #e8ecf1; --muted: #7a8899; --green: #14f195; --red: #f4545c;
+    --text: #e8ecf1; --muted: #7a8899; --green: #14f195; --green-dim: rgba(20,241,149,0.12); --red: #f4545c;
     --amber: #f5a623; --purple: #9945ff;
     --mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
   }
@@ -35,6 +35,19 @@
   .range-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
   .range-badge.in { background: rgba(20,241,149,0.12); color: var(--green); }
   .range-badge.out { background: rgba(245,166,35,0.12); color: var(--amber); }
+  .range-bar-block { margin: 14px 0; }
+  .range-bar-header { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .range-bar-header .width-val { color: var(--text); }
+  .range-bar-track { position: relative; height: 8px; background: var(--border); border-radius: 4px; margin: 4px 0;
+    background-image: repeating-linear-gradient(90deg, rgba(255,255,255,0.15) 0, rgba(255,255,255,0.15) 1px, transparent 1px, transparent calc(100% / 24));
+  }
+  .range-bar-fill { position: absolute; top: 0; height: 100%; border-radius: 4px; background: var(--green-dim); border: 1px solid rgba(20,241,149,0.4); }
+  .position-card.out-range .range-bar-fill { background: rgba(244,84,92,0.14); border-color: rgba(244,84,92,0.45); }
+  .range-bar-marker { position: absolute; top: -4px; width: 2px; height: 16px; background: var(--purple); transform: translateX(-1px); }
+  .range-bar-labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 6px; }
+  .range-bar-edge .edge-price { color: var(--text); }
+  .range-bar-edge .edge-away { color: var(--amber); }
+  .range-bar-current { color: var(--purple); text-align: center; }
   .pos-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; }
   .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
   .stat-value { font-size: 15px; font-weight: 500; }
@@ -83,6 +96,11 @@ function fmtNum(n, decimals) {
   if (n === null || n === undefined) return '—';
   return Number(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
+function fmtPrice(n) {
+  if (n === null || n === undefined) return '—';
+  const decimals = n >= 100 ? 0 : n >= 1 ? 2 : 6;
+  return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
 function fmtPct(n, decimals) {
   if (n === null || n === undefined) return '—';
   return Number(n).toFixed(decimals) + '%';
@@ -97,6 +115,42 @@ function fmtPnl(usd, pct) {
 }
 function feeTierLabel(feeTierRaw) {
   return (feeTierRaw / 10000).toFixed(2) + '%';
+}
+
+function renderRangeBar(p) {
+  const lo = p.price_lower, hi = p.price_upper, cur = p.current_price;
+  if (lo === null || hi === null || cur === null || hi <= lo) return '';
+
+  const span = hi - lo;
+  const pad = span * 0.15;
+  const rangeMin = lo - pad, rangeMax = hi + pad;
+  const pct = (v) => ((v - rangeMin) / (rangeMax - rangeMin)) * 100;
+  const fillLeft = pct(lo);
+  const fillWidth = pct(hi) - pct(lo);
+  const markerLeft = Math.min(100, Math.max(0, pct(cur)));
+
+  const edgeLabel = (v) => {
+    if (v === null || v === undefined) return '';
+    return v >= 0 ? `${v.toFixed(1)}% away` : `${Math.abs(v).toFixed(1)}% past`;
+  };
+
+  return `
+    <div class="range-bar-block">
+      <div class="range-bar-header">
+        <span>Price Range</span>
+        <span class="width-val">Width ${fmtPct(p.range_width_pct, 1)}</span>
+      </div>
+      <div class="range-bar-track">
+        <div class="range-bar-fill" style="left:${fillLeft}%; width:${fillWidth}%;"></div>
+        <div class="range-bar-marker" style="left:${markerLeft}%;" title="Current price"></div>
+      </div>
+      <div class="range-bar-labels">
+        <div class="range-bar-edge"><div class="edge-price">${fmtPrice(lo)}</div><div class="edge-away">${edgeLabel(p.pct_from_lower)}</div></div>
+        <div class="range-bar-current">▲ ${fmtPrice(cur)}</div>
+        <div class="range-bar-edge" style="text-align:right;"><div class="edge-price">${fmtPrice(hi)}</div><div class="edge-away">${edgeLabel(p.pct_from_upper)}</div></div>
+      </div>
+    </div>
+  `;
 }
 
 function renderPortfolio(portfolio) {
@@ -124,7 +178,6 @@ function renderPositions(positions) {
     const badgeClass = p.in_range ? 'in' : 'out';
     const badgeText = p.in_range ? 'In Range' : 'Out of Range';
     const usdValue = fmtUsd(p.position_value_usd);
-    const rangeWidthPct = ((p.price_upper - p.price_lower) / p.current_price * 100);
     const pnl = fmtPnl(p.pnl_usd, p.pnl_pct);
     const pnlLine = pnl ? `<div class="pnl-sub ${pnl.cls}">${pnl.text}</div>` : '';
     const posKey = p.position_mint;
@@ -135,17 +188,13 @@ function renderPositions(positions) {
           <div class="pos-title">${sym0} / ${sym1}<span class="fee-tag">${feeTierLabel(p.fee_tier)}</span><span class="chain-tag">Solana</span></div>
           <span class="range-badge ${badgeClass}">${badgeText}</span>
         </div>
+        ${renderRangeBar(p)}
         <div class="pos-grid">
           <div>
             <div class="stat-label">Current Holdings</div>
             <div class="stat-value">${fmtNum(p.amount0, 6)} ${sym0} + ${fmtNum(p.amount1, 6)} ${sym1}</div>
             <div class="stat-value" style="margin-top:2px;">${usdValue}</div>
             ${pnlLine}
-          </div>
-          <div>
-            <div class="stat-label">Price Range</div>
-            <div class="stat-value">${fmtNum(p.price_lower, 4)} – ${fmtNum(p.price_upper, 4)}</div>
-            <div class="stat-value dim" style="margin-top:2px;">Width ${fmtPct(rangeWidthPct, 1)}</div>
           </div>
           <div>
             <div class="stat-label">Current Price</div>
