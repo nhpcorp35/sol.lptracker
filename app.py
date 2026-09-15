@@ -210,7 +210,17 @@ def attach_estimated_apr(positions: list) -> list:
         pool_addr = p["whirlpool_address"]
         if pool_addr not in volume_cache:
             try:
-                volume_cache[pool_addr] = sa.get_pool_volume_usd_1d(pool_addr)
+                # Reuse the SAME cached get_pool_volume_usd() the volume
+                # bars use (defined below), not a separate uncached
+                # call — this was the actual bug: every position load
+                # hit GeckoTerminal fresh for the APR estimate
+                # specifically, unlike vfat-tracker's version which
+                # already shared its cache. Confirmed as the cause
+                # directly (real position showed '—' for estimated APR
+                # while the cached volume-bar chart, a separate call,
+                # loaded fine).
+                candles = get_pool_volume_usd(pool_addr, 1)
+                volume_cache[pool_addr] = candles[-1]["volume_usd"] if candles else None
             except Exception as e:
                 app.logger.warning("Pool volume fetch failed for estimated APR (%s): %s", pool_addr, e)
                 volume_cache[pool_addr] = None

@@ -220,15 +220,6 @@ def get_pool_volume_candles(pool_address: str, days: int) -> list:
     )
 
 
-def get_pool_volume_usd_1d(pool_address: str) -> float:
-    """Most recent day's volume only — used by the instant APR estimate,
-    which doesn't need the full candle history."""
-    candles = get_pool_volume_candles(pool_address, 1)
-    if not candles:
-        return None
-    return candles[-1]["volume_usd"]
-
-
 def fetch_orca_position(mint_str: str) -> dict:
     """Core value/range/holdings + live uncollected-fee data for one
     Orca Whirlpool position. Fee math verified byte-exact against two
