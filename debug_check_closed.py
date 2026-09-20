@@ -1,12 +1,11 @@
 import requests
 import json
 
-resp = requests.get("https://snuggle.lptracker.info/api/maxfi/positions", auth=("", "J__9EXrwEA77ScMf"), timeout=20)
-data = resp.json()
-print("=== Open positions ===")
-for p in data.get("positions", []):
-    print(f"token_id={p['token_id']}, deposit_ts={p.get('deposit_ts')}, total_rebalances={p.get('total_rebalances')}, value=${p.get('position_value_usd')}")
-
 resp2 = requests.get("https://snuggle.lptracker.info/api/maxfi/closed", auth=("", "J__9EXrwEA77ScMf"), timeout=20)
-print(f"\n=== Closed positions endpoint status: {resp2.status_code} ===")
-print(resp2.text[:2000])
+print(f"status={resp2.status_code}, len={len(resp2.text)}")
+print(f"repr: {resp2.text!r}")
+try:
+    data = resp2.json()
+    print(f"parsed type: {type(data)}, content: {json.dumps(data, indent=2)[:3000]}")
+except Exception as e:
+    print(f"json parse failed: {e}")
